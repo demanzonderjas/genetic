@@ -128,8 +128,19 @@ export class CrosswordGrid {
             const totalCells = gridSize * gridSize;
             const filledRatio = 1 - (blankCells / totalCells);
             
-            // Bonus for compactness (fewer blank cells is better)
-            fitness += filledRatio * 5000;
+            // HEAVILY favor compactness (fewer blank cells is better)
+            // Increased from 5000 to 15000 for much stronger preference
+            fitness += filledRatio * 15000;
+            
+            // Additional progressive penalty for blank cells
+            // The more blank cells, the exponentially worse the penalty
+            const blankPenalty = Math.pow(blankCells, 1.5) * 10;
+            fitness -= blankPenalty;
+            
+            // Extra bonus for very compact solutions (>60% filled)
+            if (filledRatio > 0.6) {
+                fitness += (filledRatio - 0.6) * 25000; // Big bonus for very compact solutions
+            }
             
             // Bonus for smaller grid sizes (if all words fit)
             fitness += (20 - gridSize) * 500;

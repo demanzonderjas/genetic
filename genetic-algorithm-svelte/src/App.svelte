@@ -1,8 +1,10 @@
 <script>
   import { CrosswordGeneticAlgorithm } from "./lib/genetic/CrosswordGA.js";
   import CrosswordGrid from "./lib/components/CrosswordGrid.svelte";
+  import { onDestroy } from "svelte";
 
   let ga = null;
+  let activeEvolutions = []; // Track active GA instances
   let currentGrid = $state([]);
   let currentPlacedWords = $state([]);
   let isRunning = $state(false);
@@ -12,6 +14,10 @@
   let isCompacting = $state(false);
   let isExploring = $state(false);
   let noImprovementCount = $state(0);
+  let bestSolutionDuringRun = null; // Track best during current run only
+  let workers = []; // Web workers for parallel execution
+  let workerProgress = $state({}); // Track progress of each worker
+  let parallelRuns = $state(4); // Number of parallel instances
 
   let populationSize = $state(100);
   let generations = $state(50);
@@ -79,50 +85,147 @@
     isCompacting = false;
     isExploring = false;
     noImprovementCount = 0;
+    bestSolutionDuringRun = null;
+    workerProgress = {};
 
     isRunning = true;
+    activeEvolutions = []; // Clear previous evolutions
 
-    console.log("Starting fresh evolution with", words.length, "words");
+    console.log(
+      `Starting ${parallelRuns} parallel evolutions with`,
+      words.length,
+      "words"
+    );
 
-    try {
-      ga = new CrosswordGeneticAlgorithm(words, {
-        populationSize,
-        generations,
-        mutationRate,
-        crossoverRate,
-        gridSize,
-      });
-    } catch (error) {
-      console.error("Error creating GA:", error);
-      isRunning = false;
-      return;
+    const config = {
+      populationSize,
+      generations,
+      mutationRate,
+      crossoverRate,
+      gridSize,
+    };
+
+    // Run parallel evolutions
+    const evolutionPromises = [];
+
+    for (let i = 0; i < parallelRuns; i++) {
+      workerProgress[i] = { generation: 0, bestFitness: 0 };
+
+      const evolutionPromise = runSingleEvolution(i, words, config);
+      evolutionPromises.push(evolutionPromise);
     }
 
-    await ga?.run(async (stats) => {
-      generation = stats.generation;
-      bestFitness = stats.bestFitness;
-      averageFitness = stats.averageFitness;
-      isCompacting = stats.compactionPhase || false;
-      isExploring = stats.explorationMode || false;
-      noImprovementCount = stats.noImprovementCounter || 0;
+    try {
+      // Wait for all evolutions to complete
+      const results = await Promise.all(evolutionPromises);
 
-      // Always show the current best solution
-      const gridData = ga.getBestGrid(false);
-      if (gridData) {
-        currentGrid = gridData.grid;
-        currentPlacedWords = gridData.placedWords;
-        if (gridData.gridSize) {
-          gridSize = gridData.gridSize;
+      // Find the best solution across all runs
+      const bestOverall = results.reduce((best, current) => {
+        if (!best || (current && current.fitness > best.fitness)) {
+          return current;
         }
+        return best;
+      }, null);
+
+      // Display the best solution
+      if (bestOverall) {
+        currentGrid = bestOverall.grid;
+        currentPlacedWords = bestOverall.placedWords;
+        if (bestOverall.gridSize) {
+          gridSize = bestOverall.gridSize;
+        }
+        bestFitness = bestOverall.fitness;
+        console.log(
+          `Evolution complete. Best solution from run ${bestOverall.runId} with fitness:`,
+          bestOverall.fitness
+        );
+      }
+    } catch (error) {
+      console.error("Error during parallel evolution:", error);
+    }
+
+    isRunning = false;
+  }
+
+  async function runSingleEvolution(runId, words, config) {
+    console.log(`Starting evolution run ${runId + 1}`);
+
+    const ga = new CrosswordGeneticAlgorithm(words, config);
+    activeEvolutions.push(ga); // Track active GA instance
+    let runBestSolution = null;
+
+    await ga.run(async (stats) => {
+      // Check if we should stop
+      if (!isRunning) {
+        return false; // Signal to stop evolution
+      }
+      // Update progress for this run
+      workerProgress[runId] = {
+        generation: stats.generation,
+        bestFitness: stats.bestFitness,
+      };
+
+      // Track best solution for this run
+      if (!runBestSolution || stats.bestFitness > runBestSolution.fitness) {
+        const gridData = ga.getBestGrid(false);
+        if (gridData) {
+          runBestSolution = {
+            grid: gridData.grid,
+            placedWords: gridData.placedWords,
+            gridSize: gridData.gridSize,
+            fitness: stats.bestFitness,
+            runId: runId,
+          };
+        }
+      }
+
+      // Update overall best if this run found something better
+      if (
+        !bestSolutionDuringRun ||
+        stats.bestFitness > bestSolutionDuringRun.fitness
+      ) {
+        bestSolutionDuringRun = runBestSolution;
+        bestFitness = stats.bestFitness;
+
+        // Update display with current best
+        if (runBestSolution) {
+          currentGrid = runBestSolution.grid;
+          currentPlacedWords = runBestSolution.placedWords;
+          if (runBestSolution.gridSize) {
+            gridSize = runBestSolution.gridSize;
+          }
+        }
+      }
+
+      // Calculate average stats across all runs
+      const progressValues = Object.values(workerProgress);
+      generation = Math.round(
+        progressValues.reduce((sum, p) => sum + p.generation, 0) /
+          progressValues.length
+      );
+      averageFitness =
+        progressValues.reduce((sum, p) => sum + p.bestFitness, 0) /
+        progressValues.length;
+
+      // Small delay to allow UI updates
+      if (stats.generation % 5 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
     });
 
-    isRunning = false;
+    return runBestSolution;
   }
 
   function stopEvolution() {
     isRunning = false;
+    // The GA instances will stop on next iteration when they check isRunning
+    activeEvolutions = [];
   }
+
+  // Clean up on component destroy
+  onDestroy(() => {
+    stopEvolution();
+  });
 
   function resetGrid() {
     setupEmptyGrid();
@@ -132,6 +235,7 @@
     isCompacting = false;
     isExploring = false;
     noImprovementCount = 0;
+    bestSolutionDuringRun = null;
     ga = null;
   }
 
@@ -249,6 +353,17 @@
             disabled={isRunning}
           />
         </label>
+
+        <label>
+          Parallel Runs:
+          <input
+            type="number"
+            bind:value={parallelRuns}
+            min="1"
+            max="8"
+            disabled={isRunning}
+          />
+        </label>
       </div>
 
       <h2>Words & Clues</h2>
@@ -273,18 +388,20 @@
       <div class="stats">
         <h3>Algorithm Stats</h3>
         <p>Generation: {generation}</p>
-        <p>
-          Phase: {isExploring
-            ? "🚀 Exploring"
-            : isCompacting
-              ? "🗜️ Compacting"
-              : "🔍 Searching"}
-        </p>
-        <p>Mode: {isExploring ? "Backtracking & Exploring" : "Optimizing"}</p>
-        <p>No Improvement: {noImprovementCount} gens</p>
         <p>Best Fitness: {bestFitness.toFixed(2)}</p>
         <p>Average Fitness: {averageFitness.toFixed(2)}</p>
         <p>Words Placed: {currentPlacedWords.length} / {words.length}</p>
+
+        {#if isRunning && Object.keys(workerProgress).length > 0}
+          <h4 style="margin-top: 0.5rem;">Parallel Run Progress:</h4>
+          {#each Object.entries(workerProgress) as [id, progress]}
+            <p style="font-size: 0.8rem;">
+              Run {parseInt(id) + 1}: Gen {progress.generation}, Fitness {progress.bestFitness.toFixed(
+                0
+              )}
+            </p>
+          {/each}
+        {/if}
 
         <h3 style="margin-top: 1rem;">Grid Stats</h3>
         <p>Grid Size: {currentGrid.length} × {currentGrid[0]?.length || 0}</p>

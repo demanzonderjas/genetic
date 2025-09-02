@@ -293,7 +293,7 @@ export class CrosswordGeneticAlgorithm {
             }
             
             if (onGenerationCallback) {
-                await onGenerationCallback({
+                const shouldContinue = await onGenerationCallback({
                     generation: this.currentGeneration,
                     bestFitness: this.bestEver ? this.bestEver.fitness : this.population[0].fitness,
                     currentBestFitness: this.population[0].fitness,
@@ -305,6 +305,12 @@ export class CrosswordGeneticAlgorithm {
                     explorationMode: this.explorationMode,
                     noImprovementCounter: this.noImprovementCounter
                 });
+                
+                // If callback returns false, stop evolution
+                if (shouldContinue === false) {
+                    console.log(`Evolution stopped at generation ${this.currentGeneration}`);
+                    break;
+                }
             }
             
             // Reduced delay for faster evolution
