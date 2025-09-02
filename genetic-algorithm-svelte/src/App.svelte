@@ -15,15 +15,17 @@
   let isExploring = $state(false);
   let noImprovementCount = $state(0);
   let bestSolutionDuringRun = null; // Track best during current run only
+  let absoluteBestEver = null; // Track the absolute best solution ever found
   let workers = []; // Web workers for parallel execution
   let workerProgress = $state({}); // Track progress of each worker
   let parallelRuns = $state(4); // Number of parallel instances
+  let injectionEvents = $state([]); // Track injection events
 
-  let populationSize = $state(100);
-  let generations = $state(50);
-  let mutationRate = $state(0.3);
-  let crossoverRate = $state(0.7);
-  let gridSize = $state(15);
+  let populationSize = $state(200);
+  let generations = $state(75);
+  let mutationRate = $state(0.85);
+  let crossoverRate = $state(0.5);
+  let gridSize = $state(14);
 
   const sampleWords = [
     { text: "ALGORITHM", clue: "Step-by-step procedure" },
@@ -86,7 +88,9 @@
     isExploring = false;
     noImprovementCount = 0;
     bestSolutionDuringRun = null;
+    absoluteBestEver = null;
     workerProgress = {};
+    injectionEvents = [];
 
     isRunning = true;
     activeEvolutions = []; // Clear previous evolutions
@@ -119,26 +123,43 @@
       // Wait for all evolutions to complete
       const results = await Promise.all(evolutionPromises);
 
-      // Find the best solution across all runs
-      const bestOverall = results.reduce((best, current) => {
+      // Find the best solution across all runs (from their final states)
+      const bestFinalResult = results.reduce((best, current) => {
         if (!best || (current && current.fitness > best.fitness)) {
           return current;
         }
         return best;
       }, null);
 
+      // Use the absolute best ever found (which might be better than final results)
+      const bestToDisplay = absoluteBestEver || bestFinalResult;
+
       // Display the best solution
-      if (bestOverall) {
-        currentGrid = bestOverall.grid;
-        currentPlacedWords = bestOverall.placedWords;
-        if (bestOverall.gridSize) {
-          gridSize = bestOverall.gridSize;
+      if (bestToDisplay) {
+        currentGrid = bestToDisplay.grid;
+        currentPlacedWords = bestToDisplay.placedWords;
+        if (bestToDisplay.gridSize) {
+          gridSize = bestToDisplay.gridSize;
         }
-        bestFitness = bestOverall.fitness;
-        console.log(
-          `Evolution complete. Best solution from run ${bestOverall.runId} with fitness:`,
-          bestOverall.fitness
-        );
+        bestFitness = bestToDisplay.fitness;
+
+        // Log comparison if absolute best is better than final
+        if (absoluteBestEver && bestFinalResult) {
+          if (absoluteBestEver.fitness > bestFinalResult.fitness) {
+            console.log(
+              `Evolution complete. Using absolute best (fitness: ${absoluteBestEver.fitness.toFixed(0)}) ` +
+                `which is better than best final result (fitness: ${bestFinalResult.fitness.toFixed(0)})`
+            );
+          } else {
+            console.log(
+              `Evolution complete. Final result matches absolute best with fitness: ${bestToDisplay.fitness.toFixed(0)}`
+            );
+          }
+        } else {
+          console.log(
+            `Evolution complete. Best solution with fitness: ${bestToDisplay.fitness.toFixed(0)}`
+          );
+        }
       }
     } catch (error) {
       console.error("Error during parallel evolution:", error);
@@ -163,6 +184,7 @@
       workerProgress[runId] = {
         generation: stats.generation,
         bestFitness: stats.bestFitness,
+        injections: ga.injectionAttempts || 0,
       };
 
       // Track best solution for this run
@@ -175,6 +197,7 @@
             gridSize: gridData.gridSize,
             fitness: stats.bestFitness,
             runId: runId,
+            genes: stats.bestIndividual.genes, // Store genes for injection
           };
         }
       }
@@ -187,6 +210,17 @@
         bestSolutionDuringRun = runBestSolution;
         bestFitness = stats.bestFitness;
 
+        // Also track absolute best ever (never degrades)
+        if (
+          !absoluteBestEver ||
+          runBestSolution.fitness > absoluteBestEver.fitness
+        ) {
+          absoluteBestEver = JSON.parse(JSON.stringify(runBestSolution));
+          console.log(
+            `New absolute best ever! Fitness: ${absoluteBestEver.fitness.toFixed(0)} from run ${runId + 1}`
+          );
+        }
+
         // Update display with current best
         if (runBestSolution) {
           currentGrid = runBestSolution.grid;
@@ -194,6 +228,29 @@
           if (runBestSolution.gridSize) {
             gridSize = runBestSolution.gridSize;
           }
+        }
+
+        // Share the global best with all other workers for potential injection
+        activeEvolutions.forEach((evolution, idx) => {
+          if (idx !== runId && bestSolutionDuringRun) {
+            // Create a simplified version with just the essential data
+            const globalBestData = {
+              genes: stats.bestIndividual.genes,
+              fitness: bestSolutionDuringRun.fitness,
+              gridSize: stats.bestIndividual.gridSize || gridSize,
+            };
+            evolution.updateInjectionTracking(globalBestData);
+          }
+        });
+      } else {
+        // Even if not the global best, update injection tracking
+        if (bestSolutionDuringRun && stats.bestIndividual) {
+          const globalBestData = {
+            genes: bestSolutionDuringRun.genes || stats.bestIndividual.genes,
+            fitness: bestSolutionDuringRun.fitness,
+            gridSize: bestSolutionDuringRun.gridSize || gridSize,
+          };
+          ga.updateInjectionTracking(globalBestData);
         }
       }
 
@@ -399,6 +456,9 @@
               Run {parseInt(id) + 1}: Gen {progress.generation}, Fitness {progress.bestFitness.toFixed(
                 0
               )}
+              {#if progress.injections > 0}
+                <span style="color: #e74c3c;"> (💉 {progress.injections})</span>
+              {/if}
             </p>
           {/each}
         {/if}

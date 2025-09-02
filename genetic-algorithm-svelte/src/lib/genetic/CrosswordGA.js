@@ -21,6 +21,12 @@ export class CrosswordGeneticAlgorithm {
         this.explorationMode = false;
         this.noImprovementCounter = 0;
         this.bestCheckpoints = []; // Store best solutions at different stages
+        
+        // Injection tracking for parallel runs
+        this.injectionAttempts = 0;
+        this.lastInjectionGeneration = -1;
+        this.consecutiveInferiorGenerations = 0;
+        this.globalBest = null; // Will be updated from outside
     }
     
     initialize(preserveBestEver = false) {
@@ -100,6 +106,185 @@ export class CrosswordGeneticAlgorithm {
         return sum / this.population.length;
     }
     
+    // Inject genetic material from global best when stuck in inferior local optimum
+    injectGlobalBest() {
+        if (!this.globalBest || !this.globalBest.genes) return false;
+        
+        console.log(`💉 Injecting global best (fitness: ${this.globalBest.fitness.toFixed(0)}) into population with best fitness: ${this.population[0].fitness.toFixed(0)}`);
+        
+        // Only replace 15-20% to maintain more local diversity
+        const injectionPercent = 0.15 + Math.random() * 0.05;
+        const injectionCount = Math.floor(this.populationSize * injectionPercent);
+        const startIndex = this.populationSize - injectionCount;
+        
+        // Create THREE different injection strategies for variety
+        const strategies = ['heavy_mutate', 'shuffle_rebuild', 'partial_genes'];
+        
+        for (let i = startIndex; i < this.populationSize; i++) {
+            const strategy = strategies[(i - startIndex) % strategies.length];
+            let injected;
+            
+            if (strategy === 'heavy_mutate') {
+                // Strategy 1: Heavy mutations with position randomization
+                injected = JSON.parse(JSON.stringify(this.globalBest));
+                
+                // Much more aggressive mutations (5-15 mutations)
+                const mutationCount = 5 + Math.floor(Math.random() * 11);
+                for (let j = 0; j < mutationCount; j++) {
+                    CrosswordGrid.mutate(injected, this.gridSize);
+                }
+                
+                // Randomly relocate 30-50% of words to completely new positions
+                const relocateCount = Math.floor(injected.genes.length * (0.3 + Math.random() * 0.2));
+                for (let j = 0; j < relocateCount; j++) {
+                    const geneIdx = Math.floor(Math.random() * injected.genes.length);
+                    injected.genes[geneIdx].x = Math.floor(Math.random() * this.gridSize);
+                    injected.genes[geneIdx].y = Math.floor(Math.random() * this.gridSize);
+                    injected.genes[geneIdx].direction = Math.random() < 0.5 ? 'across' : 'down';
+                }
+                
+            } else if (strategy === 'shuffle_rebuild') {
+                // Strategy 2: Take genes but completely reshuffle placement order
+                injected = JSON.parse(JSON.stringify(this.globalBest));
+                
+                // Completely randomize placement order
+                injected.genes.sort(() => Math.random() - 0.5);
+                injected.genes.forEach((gene, idx) => {
+                    gene.placementOrder = idx;
+                    // Also randomize some positions
+                    if (Math.random() < 0.4) {
+                        gene.x = Math.floor(Math.random() * this.gridSize);
+                        gene.y = Math.floor(Math.random() * this.gridSize);
+                    }
+                    // Flip some directions
+                    if (Math.random() < 0.3) {
+                        gene.direction = gene.direction === 'across' ? 'down' : 'across';
+                    }
+                });
+                
+                // Add mutations
+                const mutationCount = 3 + Math.floor(Math.random() * 5);
+                for (let j = 0; j < mutationCount; j++) {
+                    CrosswordGrid.mutate(injected, this.gridSize);
+                }
+                
+            } else {
+                // Strategy 3: Mix only partial genes with local population
+                const localParent = this.population[Math.floor(Math.random() * startIndex)];
+                injected = JSON.parse(JSON.stringify(localParent));
+                
+                // Replace 40-60% of genes with global best's genes
+                const replaceRatio = 0.4 + Math.random() * 0.2;
+                const replaceCount = Math.floor(injected.genes.length * replaceRatio);
+                const indicesToReplace = new Set();
+                
+                while (indicesToReplace.size < replaceCount) {
+                    indicesToReplace.add(Math.floor(Math.random() * injected.genes.length));
+                }
+                
+                indicesToReplace.forEach(idx => {
+                    if (this.globalBest.genes[idx]) {
+                        injected.genes[idx] = JSON.parse(JSON.stringify(this.globalBest.genes[idx]));
+                        // Add some randomness to the copied gene
+                        if (Math.random() < 0.5) {
+                            injected.genes[idx].x = Math.max(0, Math.min(this.gridSize - 1, 
+                                injected.genes[idx].x + Math.floor(Math.random() * 5 - 2)));
+                            injected.genes[idx].y = Math.max(0, Math.min(this.gridSize - 1,
+                                injected.genes[idx].y + Math.floor(Math.random() * 5 - 2)));
+                        }
+                    }
+                });
+                
+                // Heavy mutations to break out of local optimum
+                const mutationCount = 4 + Math.floor(Math.random() * 4);
+                for (let j = 0; j < mutationCount; j++) {
+                    CrosswordGrid.mutate(injected, this.gridSize);
+                }
+            }
+            
+            // Crossover with random population member for additional diversity
+            if (Math.random() < 0.4) {
+                const randomParent = this.population[Math.floor(Math.random() * this.population.length)];
+                injected = CrosswordGrid.crossover(injected, randomParent);
+            }
+            
+            injected.fitness = CrosswordGrid.calculateFitness(injected, this.gridSize);
+            this.population[i] = injected;
+        }
+        
+        // Only add pure copy occasionally (30% chance) to avoid too much convergence
+        if (Math.random() < 0.3) {
+            const pureClone = JSON.parse(JSON.stringify(this.globalBest));
+            pureClone.fitness = CrosswordGrid.calculateFitness(pureClone, this.gridSize);
+            this.population[Math.floor(this.populationSize * 0.1)] = pureClone; // Place in top 10% but not at very top
+        }
+        
+        // Add some completely fresh random individuals for maximum diversity
+        const freshCount = Math.floor(this.populationSize * 0.05); // 5% fresh blood
+        for (let i = 0; i < freshCount; i++) {
+            const fresh = CrosswordGrid.createRandomIndividual(this.words, this.gridSize);
+            fresh.fitness = CrosswordGrid.calculateFitness(fresh, this.gridSize);
+            this.population[this.populationSize - 1 - i] = fresh;
+        }
+        
+        this.sortPopulation();
+        this.injectionAttempts++;
+        this.lastInjectionGeneration = this.currentGeneration;
+        this.consecutiveInferiorGenerations = 0; // Reset counter after injection
+        
+        // Increase mutation rate temporarily after injection to encourage exploration
+        this.mutationRate = Math.min(0.8, this.mutationRate * 1.5);
+        setTimeout(() => {
+            this.mutationRate = this.mutationRate / 1.5; // Reset after a few generations
+        }, 100);
+        
+        return true;
+    }
+    
+    // Check if this worker needs injection based on performance
+    shouldInjectGlobalBest() {
+        if (!this.globalBest || !this.bestEver) return false;
+        
+        // Don't inject too frequently - give more time for exploration
+        if (this.currentGeneration - this.lastInjectionGeneration < 15) return false;
+        
+        // Check if we're significantly behind the global best
+        const fitnessGap = this.globalBest.fitness - this.bestEver.fitness;
+        const relativeGap = fitnessGap / Math.max(1, this.globalBest.fitness);
+        
+        // If we're more than 30% behind and stuck for a while, inject
+        if (relativeGap > 0.3 && this.consecutiveInferiorGenerations >= 8) {
+            return true;
+        }
+        
+        // If we're way behind (>50%), inject after some attempts
+        if (relativeGap > 0.5 && this.consecutiveInferiorGenerations >= 5) {
+            return true;
+        }
+        
+        // If we've had 3+ injections already, be very conservative
+        if (this.injectionAttempts >= 3 && relativeGap < 0.4) {
+            return false;
+        }
+        
+        return false;
+    }
+    
+    // Update tracking for injection decisions
+    updateInjectionTracking(currentGlobalBest) {
+        if (!currentGlobalBest) return;
+        
+        // Update our reference to global best
+        this.globalBest = currentGlobalBest;
+        
+        // Track if we're consistently inferior
+        if (this.bestEver && currentGlobalBest.fitness > this.bestEver.fitness * 1.1) {
+            this.consecutiveInferiorGenerations++;
+        } else {
+            this.consecutiveInferiorGenerations = Math.max(0, this.consecutiveInferiorGenerations - 1);
+        }
+    }
+    
     selectParent() {
         const tournament = [];
         const tournamentSize = 5;
@@ -114,6 +299,11 @@ export class CrosswordGeneticAlgorithm {
     }
     
     evolve() {
+        // Check if we should inject global best before evolving
+        if (this.shouldInjectGlobalBest()) {
+            this.injectGlobalBest();
+        }
+        
         const newPopulation = [];
         
         // ALWAYS keep the best ever solution in the population
